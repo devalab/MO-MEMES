@@ -20,6 +20,5 @@ Step 5. Run the framework
    `--initial` size of initial population. Default `5000`
    `--n_cluster` number of clusters made. (Note: Filename of label{n}.txt should match with number of clusters passed as parameter).
    `--periter` number of molecules to be sampled in every iteration. Default `500`
-   `--batch_size` number of molecules to be sampled in every iteration. Default `1024`
    `--eps` Exploration parameter. Default `0.05`
 
