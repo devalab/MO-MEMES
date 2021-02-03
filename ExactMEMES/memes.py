@@ -24,19 +24,6 @@ import time
 import tqdm
 import ipdb
 
-from torch.nn import Linear
-from gpytorch.means import ConstantMean, LinearMean
-from gpytorch.kernels import RBFKernel, ScaleKernel
-from gpytorch.variational import VariationalStrategy, CholeskyVariationalDistribution
-from gpytorch.distributions import MultivariateNormal
-from gpytorch.models import ApproximateGP, GP
-from gpytorch.mlls import VariationalELBO, AddedLossTerm
-from gpytorch.likelihoods import GaussianLikelihood
-from gpytorch.models.deep_gps import DeepGPLayer, DeepGP
-from gpytorch.mlls import DeepApproximateMLL
-from torch.utils.data import TensorDataset, DataLoader
-
-
 
 all_scores = {}
 def scoring_function(smile,index):
@@ -63,7 +50,6 @@ parser.add_argument('--capital',default='15000')
 parser.add_argument('--initial',default='5000')
 parser.add_argument('--periter',default='500')
 parser.add_argument('--n_cluster',default='20')
-parser.add_argument('--batch_size',default='1024')
 parser.add_argument('--save_eis', required=False,default="False")
 parser.add_argument('--eps',default='0.05')
 args = parser.parse_args()
@@ -147,102 +133,33 @@ Y_sample = Y_init
 # Number of iterations
 n_iter = iters
 
-print ("starting with {} samples".format(X_sample.shape))
-BATCH_SIZE = int(args.batch_size)
-
-
-class DeepGPHiddenLayer(DeepGPLayer):
-    def __init__(self, input_dims, output_dims, num_inducing=128, mean_type='constant'):
-        if output_dims is None:
-            inducing_points = torch.randn(num_inducing, input_dims)
-            batch_shape = torch.Size([])
-        else:
-            inducing_points = torch.randn(output_dims, num_inducing, input_dims)
-            batch_shape = torch.Size([output_dims])
-
-        variational_distribution = CholeskyVariationalDistribution(
-            num_inducing_points=num_inducing,
-            batch_shape=batch_shape
-        )
-
-        variational_strategy = VariationalStrategy(
-            self,
-            inducing_points,
-            variational_distribution,
-            learn_inducing_locations=True
-        )
-
-        super(DeepGPHiddenLayer, self).__init__(variational_strategy, input_dims, output_dims)
-
-        if mean_type == 'constant':
-            self.mean_module = ConstantMean(batch_shape=batch_shape)
-        else:
-            self.mean_module = LinearMean(input_dims)
+class ExactGPModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
+        super(ExactGPModel, self).__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel())
 
-
     def forward(self, x):
-        mean_x = self.mean_module(x) # self.linear_layer(x).squeeze(-1)
+        mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        return MultivariateNormal(mean_x, covar_x)
-
-    def __call__(self, x, *other_inputs, **kwargs):
-        """
-        Overriding __call__ isn't strictly necessary, but it lets us add concatenation based skip connections
-        easily. For example, hidden_layer2(hidden_layer1_outputs, inputs) will pass the concatenation of the first
-        hidden layer's outputs and the input data to hidden_layer2.
-        """
-        if len(other_inputs):
-            if isinstance(x, gpytorch.distributions.MultitaskMultivariateNormal):
-                x = x.rsample()
-
-            processed_inputs = [
-                inp.unsqueeze(0).expand(self.num_samples, *inp.shape)
-                for inp in other_inputs
-            ]
-
-            x = torch.cat([x] + processed_inputs, dim=-1)
-
-        return super().__call__(x, are_samples=bool(len(other_inputs)))
-
-class DeepGPModel(DeepGP):
-    def __init__(self, train_x_shape):
-
-        hidden_layer = DeepGPHiddenLayer(
-            input_dims=train_x_shape[-1],
-            output_dims=20,
-            mean_type='linear',
-        )
-
-        last_layer = DeepGPHiddenLayer(
-            input_dims=hidden_layer.output_dims,
-            output_dims=None,
-            mean_type='constant',
-        )
-
-        super().__init__()
-        self.hidden_layer = hidden_layer
-        self.last_layer = last_layer
-        self.likelihood = GaussianLikelihood()
-
-    def forward(self, inputs):
-        hidden_rep1 = self.hidden_layer(inputs)
-        output = self.last_layer(hidden_rep1)
-        return output
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 class GP:
     def __init__(self, train_x, train_y, eps=0.05):
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        self.model = ExactGPModel(train_x, train_y, self.likelihood)
         self.train_x = train_x
         self.train_y = train_y
         self.eps = eps
-        self.deepGP = DeepGPModel(train_x.shape)
 
     def train_gp(self,train_x, train_y):
         train_x = train_x.to(device)    
         train_y = train_y.to(device)
-        model = self.deepGP
-        model = model.to(device)
+        model = self.model.to(device)
+        likelihood = self.likelihood.to(device)
         
+        model.train()
+        likelihood.train()
 
         # Use the adam optimizer
         optimizer = torch.optim.Adam([
@@ -250,64 +167,52 @@ class GP:
         ], lr=0.01)
 
         # "Loss" for GPs - the marginal log likelihood
-        mll = DeepApproximateMLL(VariationalELBO(model.likelihood, model, train_x.shape[-2]))
+        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
         training_iter = 500
-        # training_iter = 1 ## testing
-        num_samples = 10 #hyperparamter
         pbar = tqdm.tqdm(range(training_iter))
-        train_dataset = TensorDataset(train_x, train_y)
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        if train_x.shape[0] <= 5000:
-            train_loader = DataLoader(train_dataset,batch_size=128,shuffle=True)
         prev_best_loss = 1e5
         early_stopping = 0
         for i in pbar:
-            minibatch_iter = tqdm.tqdm(train_loader, desc="Minibatch", leave=False)
-            loss_arr = []
-            for x_batch, y_batch in minibatch_iter:
-                with gpytorch.settings.num_likelihood_samples(num_samples):
-                    # Zero gradients from previous iteration
-                    optimizer.zero_grad()
-                    # Output from model
-                    output = model(x_batch)
-                    # Calc loss and backprop gradients
-                    loss = -mll(output, y_batch)
-                    loss.backward()
-                    
-                    loss_arr.append(loss.item())
-                    optimizer.step()
+            # Zero gradients from previous iteration
+            optimizer.zero_grad()
+            # Output from model
+            output = model(train_x)
+            # Calc loss and backprop gradients
+            loss = -mll(output, train_y)
+            loss.backward()
+            
             pbar.set_description('Iter %d/%d - Loss: %.3f ' % (
-                i + 1, training_iter, np.mean(loss_arr),
+                i + 1, training_iter, loss.item(),
             ))
-
-            if np.mean(loss_arr) < prev_best_loss:
-                prev_best_loss = np.mean(loss_arr)
+            if loss.item() < prev_best_loss:
+                prev_best_loss = loss.item()
                 early_stopping = 0
             else:
                 early_stopping += 1
 
             if early_stopping >= 10:
                 break
-
-
+            optimizer.step()
 
     def compute_ei(self,id):
-        model = self.deepGP
-        model.eval()
+        self.model.eval()
+        self.likelihood.eval()
         means = np.array([])
         stds = np.array([])
-        for i in tqdm.tqdm(range(0,len(features),BATCH_SIZE*4)):
-            test_x = features[i:i+BATCH_SIZE*4]
+        #20000 is system dependent. Change according to space in GPU
+        eval_bs_size = 20000
+        for i in tqdm.tqdm(range(0,len(features),eval_bs_size)):
+            test_x = features[i:i+eval_bs_size]
             test_x = torch.FloatTensor(test_x).to(device)
-            with torch.no_grad():
-                observed_pred = model.likelihood(model(test_x))
+            with torch.no_grad(), gpytorch.settings.fast_pred_var():
+                observed_pred = self.likelihood(self.model(test_x))
                 m = observed_pred.mean
                 s = observed_pred.stddev
-            m = m.mean(0).detach().cpu().numpy()
-            s = s.mean(0).detach().cpu().numpy()
+            m = m.cpu().numpy()
+            s = s.cpu().numpy()
             means = np.append(means,m)
             stds = np.append(stds,s)
-    
+
         imp = means - max(Y_sample) - self.eps
         Z = imp/stds
         eis = imp * norm.cdf(Z) + stds * norm.pdf(Z)
@@ -315,6 +220,7 @@ class GP:
         if save_eis:
             np.savetxt(directory_path+'/eis_' + str(id)+'.out',eis)
         return eis
+
 
 
 
