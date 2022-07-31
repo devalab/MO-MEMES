@@ -25,13 +25,25 @@ import tqdm
 import ipdb
 
 
-all_scores = {}
-def scoring_function(smile,index):
+all_scores_1 = {}
+all_scores_2 = {}
+def scoring_function_1(smile,index):
     ## add your scoring function here
     ## if want to search for molecules while optimize negative value multiply by -1 before returning
 
     score = np.random.randint(0,1000)
-    all_scores[index] = score
+    all_scores_1[index] = score
+    ## optimizing for -ve value
+    return -1*score
+    ## optimizing for +ve value
+    return +1*score
+
+def scoring_function_2(smile,index):
+    ## add your scoring function here
+    ## if want to search for molecules while optimize negative value multiply by -1 before returning
+
+    score = np.random.randint(0,1000)
+    all_scores_2[index] = score
     ## optimizing for -ve value
     return -1*score
     ## optimizing for +ve value
@@ -114,11 +126,17 @@ with open(args.smiles_path,'r') as f:
 
 ## making inital dataset 
 X_init = features[X_index]
-Y_init = []
+Y_init_1 = []
+Y_init_2 = []
 for index in X_index:
-    score = scoring_function(smiles[index],index)
-    Y_init.append(score)
-Y_init = np.array(Y_init)
+    score = scoring_function_1(smiles[index],index)
+    Y_init_1.append(score)
+
+for index in X_index:
+    score = scoring_function_2(smiles[index],index)
+    Y_init_2.append(score)
+Y_init_1 = np.array(Y_init_1)
+Y_init_2 = np.array(Y_init_2)
 
 with open(directory_path+'/start_smiles.txt','w') as f:
     for idx in X_index:
@@ -128,7 +146,8 @@ with open(directory_path+'/start_smiles.txt','w') as f:
 
 # Initialize samples
 X_sample = X_init
-Y_sample = Y_init
+Y_sample_1 = Y_init_1
+Y_sample_2 = Y_init_2
 
 # Number of iterations
 n_iter = iters
@@ -164,7 +183,7 @@ class GP:
         # Use the adam optimizer
         optimizer = torch.optim.Adam([
             {'params': model.parameters()},  # Includes GaussianLikelihood parameters
-        ], lr=0.01)
+        ], lr=0.1)
 
         # "Loss" for GPs - the marginal log likelihood
         mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
@@ -194,7 +213,7 @@ class GP:
                 break
             optimizer.step()
 
-    def compute_ei(self,id):
+    def compute_ei(self,id,best_val):
         self.model.eval()
         self.likelihood.eval()
         means = np.array([])
@@ -213,7 +232,7 @@ class GP:
             means = np.append(means,m)
             stds = np.append(stds,s)
 
-        imp = means - max(Y_sample) - self.eps
+        imp = means - best_val - self.eps
         Z = imp/stds
         eis = imp * norm.cdf(Z) + stds * norm.pdf(Z)
         eis[stds == 0.0] = 0.0
@@ -230,7 +249,10 @@ for i in range(iters):
     sys.stdout.flush()
     # initialize likelihood and model
     start_time = time.time()
-    train_x, train_y = torch.FloatTensor(X_sample), torch.FloatTensor(Y_sample)
+
+    ## property 1
+    print("Running for property 1")
+    train_x, train_y = torch.FloatTensor(X_sample), torch.FloatTensor(Y_sample_1)
     gp = GP(train_x, train_y,eps=eps)
     gp.train_gp(train_x, train_y)
     print("Fit Done in :",time.time() - start_time)
@@ -239,12 +261,27 @@ for i in range(iters):
     print("Calculatin EI")
     sys.stdout.flush()
     start_time = time.time()
-    eis = gp.compute_ei(i)
-    print("Calculated EI in:", time.time() - start_time)
+    eis_1 = gp.compute_ei(i,max(Y_sample_1))
+
+    ## property 2
+    print("Running for property 2")
+    train_x, train_y = torch.FloatTensor(X_sample), torch.FloatTensor(Y_sample_2)
+    gp = GP(train_x, train_y,eps=eps)
+    gp.train_gp(train_x, train_y)
+    print("Fit Done in :",time.time() - start_time)
     sys.stdout.flush()
+
+    print("Calculatin EI")
+    sys.stdout.flush()
+    start_time = time.time()
+    eis_2 = gp.compute_ei(i,max(Y_sample_2))
+
+    eis = eis_1*eis_2
+
     next_indexes = eis.argsort()
     X_next = []
-    Y_next = []
+    Y_next_1 = []
+    Y_next_2 = []
     count = 0
     indices = []
     if len(X_sample) < 1000:
@@ -258,8 +295,12 @@ for i in range(iters):
             count+=1
             indices.append(index)
             X_next.append(features[index])
-            score = scoring_function(smiles[index],index)
-            Y_next.append(score)
+            score = scoring_function_1(smiles[index],index)
+            Y_next_1.append(score)
+            score = scoring_function_2(smiles[index],index)
+            Y_next_2.append(score)
+
+
         if count == periter:
             break
     if(len(X_next)==0):
@@ -270,7 +311,7 @@ for i in range(iters):
     with open(directory_path+'/iter_'+str(i)+'.txt','w') as f:
         for index in indices:
             if smiles[index] not in smiles_set:
-                f.write(smiles[index] + ',' + str(all_scores[index]) + '\n')
+                f.write(smiles[index] + ',' + str(all_scores_1[index]) + ',' + str(all_scores_2[index]) + '\n')
     for index in indices:
         smiles_set.add(smiles[index])
     
@@ -278,11 +319,12 @@ for i in range(iters):
     sys.stdout.flush()
     
     X_sample = np.vstack((X_sample, X_next))
-    Y_sample = np.append(Y_sample, np.array(Y_next))
-    if(len(Y_sample)>=capital):
+    Y_sample_1 = np.append(Y_sample_1, np.array(Y_next_1))
+    Y_sample_2 = np.append(Y_sample_2, np.array(Y_next_2))
+    if(len(Y_sample_2)>=capital):
     	print("capital reached")
     	break
-    print(Y_sample.shape)
+    print(Y_sample_2.shape)
     sys.stdout.flush()
 
 
