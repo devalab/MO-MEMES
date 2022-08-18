@@ -3,11 +3,11 @@
 Implementation of MEMES framework with ExactGP as surrogate function.
 
 ## Steps to run framework
-Step 1. Store the list of smiles in text file with. (See example for format - `../DeepMEMES/Example/all.txt`.)
+Step 1. Store the list of smiles in text file with. (See example for format - `./Example/all.txt`.)
 
-Step 2. Store the features of corresponding smile in `pickle format`. (See example for format - `../DeepMEMES/Example/features_temp.pkl` directory. Only a subset is given in Examples)
+Step 2. Store the features of corresponding smile in `pickle format`. (See example for format - `./Example/features_temp.pkl` directory. Only a subset is given in Examples)
 
-Step 3. Cluster the dataset into `n` clusters. Store cluster of each in format `../DeepMEMES/Example/labels20.txt` (Script to be added; See example for format in `Example` directory)
+Step 3. Cluster the dataset into `n` clusters. Store cluster of each in format `./Example/labels20.txt` (Script to be added; See example for format in `Example` directory)
 
 Step 4. Edit the scoring function in `memes.py`
 
